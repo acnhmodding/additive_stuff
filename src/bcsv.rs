@@ -8,6 +8,8 @@ pub struct BCSV {
     pub entry_size: i32,
     pub fields: Vec<Field>,
     pub entries: Vec<Vec<BCSVValue>>,
+    pub rows_start: usize,
+    pub raw_bytes: Vec<u8>,
     pub has_extended_header: u8,
     pub unknown_field: u8,
     pub header_version: i32,
@@ -68,10 +70,11 @@ impl BCSV {
         }
 
         // Read entries
+        let rows_start = reader.position() as usize;
         let mut entries = Vec::with_capacity(entry_count as usize);
-        for _ in 0..entry_count {
-            let entry_pos = reader.read_u32::<LittleEndian>()?;
+        for row_index in 0..entry_count {
             let mut entry = Vec::with_capacity(fields.len());
+            let entry_pos = rows_start + (row_index as usize * entry_size as usize);
 
             for field in &fields {
                 reader.seek(SeekFrom::Start(entry_pos as u64 + field.offset as u64))?;
@@ -103,13 +106,14 @@ impl BCSV {
             }
 
             entries.push(entry);
-            reader.seek(SeekFrom::Start(entry_pos as u64 + entry_size as u64))?;
         }
 
         Ok(Self {
             entry_size,
             fields,
             entries,
+            rows_start,
+            raw_bytes: bytes.to_vec(),
             has_extended_header,
             unknown_field,
             header_version,
