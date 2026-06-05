@@ -18,8 +18,6 @@ use skyline::patching::Patch;
 
 #[skyline::main(name = "acnh_additive_stuff")]
 pub fn main() {
-    println!("Hello from skyline plugin");
-
     skyline::install_hooks!(
         get_unit_icon_hook,
         load_icon_data_hook,
@@ -27,40 +25,10 @@ pub fn main() {
     );
 }
 
-fn get_labels_from_bcsv(file_name: &str, column_index: usize) -> HashMap<String, u32> {
-    let path = format!("content:/Bcsv/{}.bcsv", file_name);
-    let Some(file) = std::fs::read(&path).ok() else {
-        println!("Failed to read BCSV file.");
-        return HashMap::new();
-    };
-
-    let Some(bcsv) = BCSV::from_bytes(&file).ok() else {
-        println!("Failed to parse BCSV file.");
-        return HashMap::new();
-    };
-
-    println!("BCSV loaded! Hashing entries...");
-
-    bcsv.entries.iter()
-        .filter_map(|entry| entry.get(column_index))
-        .filter_map(|value| {
-            if let BCSVValue::String(s) = value {
-                Some((s.clone(), crc32fast::hash(s.as_bytes())))
-            } else {
-                None
-            }
-        })
-        .collect()
-}
-
 fn load_bcsv_bytes_from_content(file_name: &str) -> Option<Vec<u8>> {
     let path = format!("content:/Bcsv/{}.bcsv", file_name);
     std::fs::read(&path).ok()
 }
-
-static UNIT_ICON_HASHES: LazyLock<HashMap<String, u32>> = LazyLock::new(|| get_labels_from_bcsv("ItemUnitIcon", 4));
-static MENU_ICON_HASHES: LazyLock<HashMap<String, u32>> = LazyLock::new(|| get_labels_from_bcsv("ItemMenuIcon", 1));
-const TEST_ICON_INDEX: u32 = 217;
 
 static CUSTOM_ICON_BCSV_BYTES: LazyLock<Box<[u8]>> = LazyLock::new(|| {
     let Some(bytes) = load_bcsv_bytes_from_content("ItemUnitIcon") else {
@@ -97,6 +65,7 @@ static CUSTOM_ICON_ROW_PTRS: LazyLock<Box<[usize]>> = LazyLock::new(|| {
     row_ptrs.into_boxed_slice()
 });
 
+// ItemUnitIcon row structure from ItemUnitIcon.bcsv
 #[repr(C)]
 #[allow(dead_code)]
 struct ItemUnitIconRow {
@@ -111,6 +80,7 @@ struct ItemUnitIconRow {
     res_name: [u8; 64],               // 0x8D
 }
 
+// Not sure if this is correct either
 #[repr(C)]
 struct PackedItemKey {
     item_id: u16,    // 0x08..0x09
@@ -126,18 +96,30 @@ struct GetUnitIconCtx {
     item_param_row: *const u8,  // 0x10, cached row pointer used by the icon chooser
 }
 
+
+// Not sure if this is correct
+#[repr(C)]
+struct LoadIconDataCtx {
+    vtable_or_iface: *const u8, // 0x00
+    text: *const c_char,        // 0x08
+}
+
+
 #[skyline::hook(offset = 0xfbf920)]
 unsafe fn get_unit_icon_hook(param1: *const GetUnitIconCtx) -> u16 {
-    return TEST_ICON_INDEX as u16;
+    //return 5;
+    call_original!(param1)
 }
 
 #[skyline::hook(offset = 0xf6ccc0)]
-unsafe fn load_icon_data_hook(param_1: *mut u64) {
+unsafe fn load_icon_data_hook(param_1: *mut LoadIconDataCtx) {
     call_original!(param_1);
 
-    // I have no idea why this is necessary but without it the custom icons doesn't load
+    // For some reason we need this on custom icon, but it seems to break vanilla icons
     std::thread::yield_now();
 }
+
+const TEST_ICON_INDEX: u32 = 217;
 
 #[skyline::hook(offset = 0xf6cb70)]
 unsafe fn get_icon_row_hook(param1: *const u8, icon_index: u32) -> *const u32 {
