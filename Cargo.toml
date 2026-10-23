@@ -5,15 +5,14 @@ authors = []
 edition = "2021"
 
 [package.metadata.skyline]
-titleid = "01006A800016E000" # Smash Ultimate
+titleid = "01006F8002326000"
 
 [lib]
 crate-type = ["cdylib"]
 
 [dependencies]
-byteorder = "1.5.0"
 crc32fast = "1.5.0"
-skyline = "0.3.0"
+skyline = "0.6.0"
 
 [profile.dev]
 panic = "abort"

@@ -6,16 +6,9 @@ version = 4
 name = "acnh_additive_stuff"
 version = "0.1.0"
 dependencies = [
- "byteorder",
  "crc32fast",
  "skyline",
 ]
-
-[[package]]
-name = "byteorder"
-version = "1.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 
 [[package]]
 name = "cfg-if"
@@ -40,15 +33,15 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
 name = "libc-nnsdk"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ece4a9a361bf75974e2c18b719e8fd501e4e336d7a5db22d077c4f2367a94be9"
+checksum = "1256a11d163c7288d94909f8120ede53294d8c233df314b0e4f01cf0269707da"
 
 [[package]]
 name = "nnsdk"
-version = "0.4.0"
+version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "66d9c4d56d2f525cb705822bf8a9177aee85258636ee1b7b832e1cc4f2b0d76c"
+checksum = "26aa8c57f278ea8e9158530faf0154ee253fe2ed49383730878d62175ace86a3"
 dependencies = [
  "libc-nnsdk",
 ]
@@ -73,9 +66,9 @@ dependencies = [
 
 [[package]]
 name = "skyline"
-version = "0.3.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aa2f3ebf5652c1b2f5d3297d702ef35fbdfc64a0eb0d6d4eba2f1615831ea947"
+checksum = "7b4c2c28cda0d198befe59479c593537fc306cabb61d32a9428fcd2725df35c6"
 dependencies = [
  "libc-nnsdk",
  "nnsdk",
@@ -84,9 +77,9 @@ dependencies = [
 
 [[package]]
 name = "skyline_macro"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9194b20ee17c1de2ed299cfd9b8b56160a35b5579b3273c416ab4e5c058844dc"
+checksum = "9c6ce616cf990bbff33e6dfdf47bfc0add2e5fca5ba3dbefda64c92bd9fc8068"
 dependencies = [
  "lazy_static",
  "proc-macro2",

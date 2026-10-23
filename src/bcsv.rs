@@ -1,122 +1,135 @@
-use std::io::{Cursor, Seek, SeekFrom, Read};
-use byteorder::{LittleEndian, ReadBytesExt};
-
-use crate::{data_type::DataType, field::Field, bcsv_value::BCSVValue};
-
-#[derive(Debug)]
-pub struct BCSV {
-    pub entry_size: i32,
-    pub fields: Vec<Field>,
-    pub entries: Vec<Vec<BCSVValue>>,
+/// A borrowed BCSV table; field types and widths come from its caller.
+pub struct BcsvView<'a> {
+    bytes: &'a [u8],
+    pub count: usize,
+    pub stride: usize,
     pub rows_start: usize,
-    pub raw_bytes: Vec<u8>,
-    pub has_extended_header: u8,
-    pub unknown_field: u8,
-    pub header_version: i32,
+    fields_start: usize,
 }
 
-impl BCSV {
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Box<dyn std::error::Error>> {
-        let mut reader = Cursor::new(bytes);
-
-        let entry_count = reader.read_u32::<LittleEndian>()?;
-        let entry_size = reader.read_i32::<LittleEndian>()?;
-        let field_count = reader.read_u16::<LittleEndian>()?;
-
-        let has_extended_header = reader.read_u8()?;
-        let unknown_field = reader.read_u8()?;
-
-        let mut header_version = 0;
-        if has_extended_header == 1 {
-            let mut magic: [u8; 4]  = [0u8; 4];
-            reader.read_exact(&mut magic)?;
-            if &magic != b"VSCB" {
-                return Err("Invalid BCSV magic".into());
-            }
-
-            header_version = reader.read_i32::<LittleEndian>()?;
-            reader.seek(SeekFrom::Current(8))?;
+impl<'a> BcsvView<'a> {
+    pub fn from_bytes(bytes: &'a [u8]) -> Result<Self, &'static str> {
+        if bytes.len() < 12 {
+            return Err("Truncated BCSV header");
         }
-
-        // Read field definitions
-        let mut fields = Vec::with_capacity(field_count as usize);
-        for _ in 0..field_count {
-            let hash = reader.read_u32::<LittleEndian>()?;
-            let offset = reader.read_i32::<LittleEndian>()?;
-            fields.push(Field {
-                hash,
-                offset,
-                size: 0,
-                data_type: DataType::UInt32,
-            });
+        let count = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
+        let stride = u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize;
+        let field_count = u16::from_le_bytes(bytes[8..10].try_into().unwrap()) as usize;
+        let fields_start = match bytes[10] {
+            0 => 12,
+            1 if bytes.len() >= 28 && &bytes[12..16] == b"VSCB" => 28,
+            _ => return Err("Invalid BCSV extended header"),
+        };
+        if stride < 4 || stride > i32::MAX as usize {
+            return Err("Invalid BCSV row size");
         }
-
-        // Compute field sizes and assign dummy types
-        for i in 0..fields.len() {
-            let end = if i + 1 < fields.len() {
-                fields[i + 1].offset
-            } else {
-                entry_size
-            };
-            
-            fields[i].size = end - fields[i].offset;
-            // fields[i].data_type = match fields[i].size {
-            //     1 => DataType::U8,
-            //     2 => DataType::UInt16,
-            //     4 => DataType::UInt32,
-            //     _ => DataType::BitField,
-            // };
-            fields[i].data_type = DataType::String;
+        let rows_start = fields_start + field_count * 8;
+        let end = count
+            .checked_mul(stride)
+            .and_then(|n| rows_start.checked_add(n))
+            .ok_or("BCSV size overflow")?;
+        if end > bytes.len() {
+            return Err("Truncated BCSV data");
         }
-
-        // Read entries
-        let rows_start = reader.position() as usize;
-        let mut entries = Vec::with_capacity(entry_count as usize);
-        for row_index in 0..entry_count {
-            let mut entry = Vec::with_capacity(fields.len());
-            let entry_pos = rows_start + (row_index as usize * entry_size as usize);
-
-            for field in &fields {
-                reader.seek(SeekFrom::Start(entry_pos as u64 + field.offset as u64))?;
-                let value = match field.data_type {
-                    DataType::BitField => {
-                        let mut buf = vec![0u8; field.size as usize];
-                        reader.read_exact(&mut buf)?;
-                        BCSVValue::Bytes(buf)
-                    }
-                    DataType::S8 => BCSVValue::SByte(reader.read_i8()?),
-                    DataType::U8 => BCSVValue::Byte(reader.read_u8()?),
-                    DataType::Int16 => BCSVValue::Short(reader.read_i16::<LittleEndian>()?),
-                    DataType::UInt16 => BCSVValue::UShort(reader.read_u16::<LittleEndian>()?),
-                    DataType::Int32 => BCSVValue::Int(reader.read_i32::<LittleEndian>()?),
-                    DataType::UInt32 | DataType::CRC32 | DataType::MMH3 => {
-                        BCSVValue::UInt(reader.read_u32::<LittleEndian>()?)
-                    }
-                    DataType::Float32 => BCSVValue::Float(reader.read_f32::<LittleEndian>()?),
-                    DataType::Float64 => BCSVValue::Double(reader.read_f64::<LittleEndian>()?),
-                    DataType::String => {
-                        let mut buf = vec![0u8; field.size as usize];
-                        reader.read_exact(&mut buf)?;
-                        let str_end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-                        let str_val = String::from_utf8_lossy(&buf[..str_end]).to_string();
-                        BCSVValue::String(str_val)
-                    }
-                };
-                entry.push(value);
-            }
-
-            entries.push(entry);
-        }
-
-        Ok(Self {
-            entry_size,
-            fields,
-            entries,
+        let view = Self {
+            bytes,
+            count,
+            stride,
             rows_start,
-            raw_bytes: bytes.to_vec(),
-            has_extended_header,
-            unknown_field,
-            header_version,
-        })
+            fields_start,
+        };
+        if view.fields().any(|(_, offset)| offset >= stride) {
+            return Err("Invalid BCSV field offset");
+        }
+        Ok(view)
     }
+
+    /// The caller must provide a live native allocation containing the entire
+    /// table described by its header. Header sizes are not allocation bounds.
+    pub unsafe fn from_native(header: *const u8) -> Option<Self> {
+        if header.is_null() {
+            return None;
+        }
+        let prefix = std::slice::from_raw_parts(header, 12);
+        let count = u32::from_le_bytes(prefix[0..4].try_into().ok()?) as usize;
+        let stride = u32::from_le_bytes(prefix[4..8].try_into().ok()?) as usize;
+        let fields = u16::from_le_bytes(prefix[8..10].try_into().ok()?) as usize;
+        if count == 0
+            || count > u16::MAX as usize
+            || !(4..=0x10000).contains(&stride)
+            || fields == 0
+            || fields > 1024
+            || prefix[10] > 1
+        {
+            return None;
+        }
+        let start = if prefix[10] == 1 { 28usize } else { 12usize } + fields * 8;
+        let len = start.checked_add(count.checked_mul(stride)?)?;
+        if len > u32::MAX as usize || (header as usize).checked_add(len).is_none() {
+            return None;
+        }
+        Self::from_bytes(std::slice::from_raw_parts(header, len)).ok()
+    }
+
+    /// Read a scalar from a live native row whose first word is its file offset.
+    /// The same allocation validity requirements as from_native apply.
+    pub unsafe fn read_native_u32(row: *const u8, field_hash: u32) -> Option<u32> {
+        if row.is_null() {
+            return None;
+        }
+        let position = std::ptr::read_unaligned(row as *const u32) as usize;
+        if position == 0 || position > row as usize {
+            return None;
+        }
+        let table = Self::from_native(row.sub(position))?;
+        if position < table.rows_start || (position - table.rows_start) % table.stride != 0 {
+            return None;
+        }
+        let bytes = table.row((position - table.rows_start) / table.stride)?;
+        let offset = table.field(field_hash, 4)?;
+        Some(u32::from_le_bytes(
+            bytes[offset..offset + 4].try_into().ok()?,
+        ))
+    }
+
+    pub fn fields(&self) -> impl Iterator<Item = (u32, usize)> + '_ {
+        self.bytes[self.fields_start..self.rows_start]
+            .chunks_exact(8)
+            .map(|field| {
+                (
+                    u32::from_le_bytes(field[0..4].try_into().unwrap()),
+                    u32::from_le_bytes(field[4..8].try_into().unwrap()) as usize,
+                )
+            })
+    }
+
+    pub fn field(&self, hash: u32, width: usize) -> Option<usize> {
+        let mut matches = self.fields().filter(|(candidate, _)| *candidate == hash);
+        let (_, offset) = matches.next()?;
+        if matches.next().is_some() || offset < 4 || offset.checked_add(width)? > self.stride {
+            return None;
+        }
+        Some(offset)
+    }
+
+    pub fn row(&self, index: usize) -> Option<&'a [u8]> {
+        if index >= self.count {
+            return None;
+        }
+        let offset = self.rows_start + index * self.stride;
+        let row = &self.bytes[offset..offset + self.stride];
+        if u32::from_le_bytes(row[0..4].try_into().ok()?) as usize != offset {
+            return None;
+        }
+        Some(row)
+    }
+}
+
+pub fn string_field(row: &[u8], offset: usize, width: usize) -> Option<&[u8]> {
+    let bytes = row.get(offset..offset.checked_add(width)?)?;
+    let len = bytes.iter().position(|byte| *byte == 0)?;
+    if len == 0 {
+        return None;
+    }
+    Some(&bytes[..len])
 }
