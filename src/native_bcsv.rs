@@ -1,5 +1,3 @@
-use std::ptr::{read_unaligned, write_unaligned};
-
 use crate::bcsv::BcsvView;
 
 pub const UNMAPPED_ALIAS: u16 = u16::MAX;
@@ -44,14 +42,17 @@ pub struct BorrowedString {
     pub text: *const u8,
 }
 
-pub struct RowAssignment {
-    raw_index: usize,
-    pub alias: u16,
-    row: *const u8,
+/// The cache arrays an extension writes, borrowed once validated.
+pub struct CacheExtension<'a> {
+    pub table: BcsvView<'a>,
+    valid_flags: &'a [u8],
+    raw_to_alias: &'a mut [u16],
+    rows: &'a mut [*const u8],
+    row_count: &'a mut u32,
 }
 
 impl BcsvCache {
-    pub unsafe fn extension_table(&self) -> Result<BcsvView<'_>, &'static str> {
+    pub unsafe fn extension(&mut self) -> Result<CacheExtension<'_>, &'static str> {
         if self.key_accessor == 0
             || self.key_adjustment_and_virtual != 0
             || self.sort_comparator != 0
@@ -62,6 +63,8 @@ impl BcsvCache {
             || self.rows.data.is_null()
             || self.raw_to_alias.data.is_null()
             || self.valid_flags.data.is_null()
+            || !self.rows.data.is_aligned()
+            || !self.raw_to_alias.data.is_aligned()
             || self.row_count != self.configured_count
             || self.row_count == 0
             || self.row_count >= UNMAPPED_ALIAS as u32
@@ -70,66 +73,61 @@ impl BcsvCache {
         }
         let table = BcsvView::from_native((*self.loaded_file).header)
             .ok_or("invalid native BCSV header")?;
-        if table.count > self.raw_to_alias.capacity as usize
-            || table.count > self.valid_flags.capacity as usize
+        if table.count() > self.raw_to_alias.capacity as usize
+            || table.count() > self.valid_flags.capacity as usize
             || self.row_count > self.rows.capacity
         {
             return Err("native cache arrays are too small");
         }
-        Ok(table)
-    }
-
-    // Call after extension_table has validated the native arrays and counts.
-    pub unsafe fn is_valid_row(&self, raw_index: usize) -> bool {
-        raw_index < self.valid_flags.capacity as usize && *self.valid_flags.data.add(raw_index) != 0
-    }
-
-    pub unsafe fn row_alias(&self, raw_index: usize) -> Result<u16, &'static str> {
-        if raw_index >= self.raw_to_alias.capacity as usize || self.raw_to_alias.data.is_null() {
-            return Err("invalid native raw row index");
-        }
-        let alias = read_unaligned(self.raw_to_alias.data.add(raw_index));
-        if alias != UNMAPPED_ALIAS && alias as u32 >= self.row_count {
-            return Err("invalid existing native alias");
-        }
-        Ok(alias)
-    }
-
-    pub unsafe fn plan_row(
-        &self,
-        raw_index: usize,
-        row: *const u8,
-        appended: usize,
-    ) -> Result<RowAssignment, &'static str> {
-        let alias = self.row_count as usize + appended;
-        if alias >= UNMAPPED_ALIAS as usize || alias >= self.rows.capacity as usize {
-            return Err("not enough unused native row slots");
-        }
-        if !read_unaligned(self.rows.data.add(alias)).is_null() {
-            return Err("new row slot is already occupied");
-        }
-        Ok(RowAssignment {
-            raw_index,
-            alias: alias as u16,
-            row,
+        // Aliases must stay below UNMAPPED_ALIAS, so later slots are unusable.
+        let slots = (self.rows.capacity as usize).min(UNMAPPED_ALIAS as usize);
+        Ok(CacheExtension {
+            table,
+            valid_flags: std::slice::from_raw_parts(self.valid_flags.data, table.count()),
+            raw_to_alias: std::slice::from_raw_parts_mut(self.raw_to_alias.data, table.count()),
+            rows: std::slice::from_raw_parts_mut(self.rows.data, slots),
+            row_count: &mut self.row_count,
         })
     }
+}
 
-    /// Publish assignments prepared for this unchanged cache by plan_row.
+impl CacheExtension<'_> {
+    pub fn is_valid(&self, raw_index: usize) -> bool {
+        self.valid_flags[raw_index] != 0
+    }
+
+    /// Whether the native cache already gave this raw row an alias.
+    pub fn is_mapped(&self, raw_index: usize) -> Result<bool, &'static str> {
+        match self.raw_to_alias[raw_index] {
+            UNMAPPED_ALIAS => Ok(false),
+            alias if (alias as u32) < *self.row_count => Ok(true),
+            _ => Err("invalid existing native alias"),
+        }
+    }
+
+    /// The alias append gives the row after `appended` earlier ones.
+    pub fn next_alias(&self, appended: usize) -> u16 {
+        (*self.row_count as usize + appended) as u16
+    }
+
+    /// Map (raw index, row) pairs to the next free aliases, all or nothing.
     /// Native loading/rebuild synchronization remains the game's contract.
-    pub unsafe fn publish_rows(&mut self, assignments: &[RowAssignment]) {
-        for assignment in assignments {
-            write_unaligned(
-                self.rows.data.add(assignment.alias as usize),
-                assignment.row,
-            );
-            write_unaligned(
-                self.raw_to_alias.data.add(assignment.raw_index),
-                assignment.alias,
-            );
+    pub fn append(&mut self, new_rows: &[(usize, *const u8)]) -> Result<(), &'static str> {
+        let start = *self.row_count as usize;
+        let slots = self
+            .rows
+            .get_mut(start..start + new_rows.len())
+            .ok_or("not enough unused native row slots")?;
+        if slots.iter().any(|slot| !slot.is_null()) {
+            return Err("new row slot is already occupied");
+        }
+        for (alias, (slot, &(raw_index, row))) in (start..).zip(slots.iter_mut().zip(new_rows)) {
+            *slot = row;
+            self.raw_to_alias[raw_index] = alias as u16;
         }
         // Count last; no allocation or fallible operation during publication.
-        self.row_count += assignments.len() as u32;
+        *self.row_count += new_rows.len() as u32;
+        Ok(())
     }
 }
 
